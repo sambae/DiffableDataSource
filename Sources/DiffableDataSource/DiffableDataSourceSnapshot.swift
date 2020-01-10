@@ -3,9 +3,28 @@ import UIKit
 
 struct DiffableDataSourceSnapshot<SectionIdentifierType, ItemIdentifierType> where SectionIdentifierType: Hashable, ItemIdentifierType: Hashable {
 
-    // MARK: -- Private API
+    // MARK: Private API
 
-    private struct Section {
+    private struct DiffableWrapper: Hashable, DiffAware {
+        let item: AnyHashable
+    }
+
+    internal struct SectionChanges {
+        let deletions: IndexSet
+        let insertions: IndexSet
+    }
+
+    internal struct RowChanges {
+        let deletions: [IndexPath]
+        let insertions: [IndexPath]
+    }
+
+    private struct Section: Hashable, DiffAware {
+        static func == (lhs: DiffableDataSourceSnapshot<SectionIdentifierType, ItemIdentifierType>.Section, rhs: DiffableDataSourceSnapshot<SectionIdentifierType, ItemIdentifierType>.Section) -> Bool {
+            lhs.hashValue == rhs.hashValue
+        }
+        var diffId: Int { id.hashValue }
+
         var id: SectionIdentifierType
         var rows: [ItemIdentifierType] = []
         var numberOfRows: Int { rows.count }
@@ -19,6 +38,14 @@ struct DiffableDataSourceSnapshot<SectionIdentifierType, ItemIdentifierType> whe
         mutating func append(_ items: [ItemIdentifierType]) {
             rows.append(contentsOf: items)
         }
+
+        mutating func remove(at index: Int) {
+            rows.remove(at: index)
+        }
+
+        mutating func insert(_ item: ItemIdentifierType, at index: Int) {
+            rows.insert(item, at: index)
+        }
     }
 
     private var layout: [Section] = []
@@ -27,7 +54,70 @@ struct DiffableDataSourceSnapshot<SectionIdentifierType, ItemIdentifierType> whe
         return layout[indexPath.section][indexPath.row]
     }
 
-    // MARK: -- Public API
+    mutating internal func sectionDiff(from snapshot: DiffableDataSourceSnapshot) -> SectionChanges {
+        let changes = diff(old: layout, new: snapshot.layout)
+
+        var deletions: [Delete<Section>] = []
+        var insertions: [Insert<Section>] = []
+
+        changes.forEach { change in
+            switch change {
+            case .delete(let deletion): deletions.append(deletion)
+            case .insert(let insertion): insertions.append(insertion)
+            case .replace, .move: break
+            }
+        }
+
+        deletions.forEach {
+            layout.remove(at: $0.index)
+        }
+        insertions.forEach {
+            layout.insert($0.item, at: $0.index)
+        }
+
+        let deletionSet = IndexSet(deletions.map { $0.index })
+        let insertionSet = IndexSet(insertions.map { $0.index })
+
+        return SectionChanges(deletions: deletionSet, insertions: insertionSet)
+    }
+
+    mutating internal func rowDiff(from snapshot: DiffableDataSourceSnapshot) -> RowChanges {
+        var allDeletions: [IndexPath] = []
+        var allInsertions: [IndexPath] = []
+
+        zip(layout, snapshot.layout).enumerated().forEach { sectionIndex, zip in
+            var deletions: [Delete<DiffableWrapper>] = []
+            var insertions: [Insert<DiffableWrapper>] = []
+
+            let oldRows = zip.0.rows.map { DiffableWrapper(item: $0)}
+            let newRows = zip.1.rows.map { DiffableWrapper(item: $0)}
+
+            let changes = diff(old: oldRows, new: newRows)
+
+            changes.forEach { change in
+                switch change {
+                case .delete(let deletion): deletions.append(deletion)
+                case .insert(let insertion): insertions.append(insertion)
+                case .replace, .move: break
+                }
+            }
+
+            deletions.forEach {
+                guard let item = $0.item.item as? ItemIdentifierType else { return }
+
+                layout[sectionIndex].insert(item, at: $0.index)
+                allInsertions.append(IndexPath(row: $0.index, section: sectionIndex))
+            }
+            insertions.forEach {
+                layout[sectionIndex].remove(at: $0.index)
+                allDeletions.append(IndexPath(row: $0.index, section: sectionIndex))
+            }
+        }
+
+        return RowChanges(deletions: allDeletions, insertions: allInsertions)
+    }
+
+    // MARK: Public API
 
     var itemIdentifiers: [ItemIdentifierType] { layout.flatMap { $0.rows } }
     var sectionIdentifiers: [SectionIdentifierType] { layout.map { $0.id } }
